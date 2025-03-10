@@ -1,7 +1,28 @@
-from flask import Flask, jsonify, request
+from flask import Flask, send_file, jsonify, request
 from main import app, con
 import re
 from flask_bcrypt import generate_password_hash, check_password_hash
+import jwt
+from fpdf import FPDF
+import os
+
+app.config.from_pyfile('config.py')
+
+senha_secreta = app.config['SECRET_KEY']
+
+if not os.path.exists(app.config['UPLOAD_FOLDER']):
+    os.makedirs(app.config['UPLOAD_FOLDER'])
+
+def generate_token(user_id):
+    payload = {'id_usuario': user_id}
+    token = jwt.encode(payload, senha_secreta, algorithm='HS256')
+    return token
+
+def remover_bearer(token):
+    if token.startswith('Bearer '):
+        return token[len('Bearer '):]
+    else:
+        return token
 
 @app.route('/livro', methods=['GET'])
 def livro():
@@ -20,10 +41,23 @@ def livro():
 
 @app.route('/livro', methods=['POST'])
 def livro_post():
-    data = request.get_json()
-    titulo = data.get('titulo')
-    autor = data.get('autor')
-    ano_publicacao = data.get('ano_publicacao')
+    token = request.headers.get('Authorization')
+    if not token:
+        return jsonify({'message': 'Token de autenticação necessário'}), 401
+
+    token = remover_bearer(token)
+    try:
+        payload = jwt.decode(token, senha_secreta, algorithms=['HS256'])
+        id_usuario = payload['id_usuario']
+    except jwt.ExpiredSignatureError:
+        return jsonify({'message': 'Token expirado!'}), 401
+    except jwt.InvalidTokenError:
+        return jsonify({'message': 'Token inválido!'}), 401
+
+    titulo = request.form.get('titulo')
+    autor = request.form.get('autor')
+    ano_publicacao = request.form.get('ano_publicacao')
+    imagem = request.files.get('imagem')  # Arquivo enviado,
 
     cursor = con.cursor()
 
@@ -32,17 +66,26 @@ def livro_post():
     if cursor.fetchone():
         return jsonify('Livro já cadastrado!')
 
-    cursor.execute('INSERT INTO LIVROS (TITULO, AUTOR, ANO_PUBLICACAO) VALUES (?,?,?)', (titulo, autor, ano_publicacao))
+    cursor.execute("INSERT INTO LIVROS (TITULO, AUTOR, ANO_PUBLICACAO) VALUES (?,?,?) RETURNING ID_livro", (titulo, autor, ano_publicacao))
 
+    livro_id = cursor.fetchone()[0]
     con.commit()
     cursor.close()
+
+    if imagem:
+        nome_imagem = f"{livro_id}.jpeg"
+        pasta_destino = os.path.join(app.config['UPLOAD_FOLDER'], "Livros")
+        os.makedirs(pasta_destino, exist_ok=True)
+        imagem_path = os.path.join(pasta_destino, nome_imagem)
+        imagem.save(imagem_path)
 
     return jsonify({
         'message':'Livro cadastrado com sucesso!',
         'livro': {
             'titulo': titulo,
             'autor': autor,
-            'ano_publicacao': ano_publicacao
+            'ano_publicacao': ano_publicacao,
+            'imagem': imagem_path
         }
     })
 
@@ -138,7 +181,7 @@ def usuario_post():
 
     senha = generate_password_hash(senha).decode('utf-8')
 
-    cursor.execute('INSERT INTO USUARIOS (NOME, EMAIL, SENHA) VALUES (?,?,?)', (nome, senha, senha))
+    cursor.execute('INSERT INTO USUARIOS (NOME, EMAIL, SENHA) VALUES (?,?,?)', (nome, email, senha))
 
     con.commit()
     cursor.close()
@@ -200,7 +243,7 @@ def deletar_usuario(id):
         'id_usuario': id
     })
 
-@app.route('/login', methods=['GET, POST'])
+@app.route('/login', methods=['POST'])
 def login():
     data = request.get_json()
     email = data.get('email')
@@ -208,16 +251,51 @@ def login():
 
     cursor = con.cursor()
 
-    cursor.execute("SELECT senha FROM usuarios WHERE email = ?", (email, ))
-    senha = cursor.fetchone()
+    cursor.execute("SELECT senha, id_usuario FROM usuarios WHERE email = ?", (email, ))
+    resultado = cursor.fetchone()
     cursor.close()
 
-    if not senha:
-        return jsonify({"error: Usuário não encontrado!"}), 404
+    if not resultado:
+        return jsonify({'error': 'Usuário não encontrado!'}), 404
 
-    senha_hash = senha[0]
+    senha_hash = resultado[0]
+    id_usuario = resultado[1]
 
     if check_password_hash(senha_hash, senha):
-        return jsonify({'message': "Login realizado com sucesso!"}), 200
+        token = generate_token(id_usuario)
+        return jsonify({'message': 'Login realizado com sucesso!', 'token': token}), 200
 
-    return jsonify({"error": "E-mail ou senha inválidos!"}), 401
+    else:
+        return jsonify({'message': 'E-mail ou senha inválidos!'}), 401
+
+@app.route('/livros/relatorio', methods=['GET'])
+def gerar_relatorio():
+    cursor = con.cursor()
+    cursor.execute("SELECT id_livro, titulo, autor, ano_publicacao FROM livros")
+    livros = cursor.fetchall()
+    cursor.close()
+    con.close()
+
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+    pdf.set_font("Arial", style='B', size=16)
+    pdf.cell(200, 10, "Relatório de Livros", ln=True, align='C')
+
+    pdf.ln(5)
+    pdf.line(10, pdf.get_y(), 200, pdf.get_y())
+    pdf.ln(5)
+
+    pdf.set_font("Arial", size=12)
+    for livro in livros:
+        pdf.cell(200, 10, f"ID: {livro[0]} - {livro[1]} - {livro[2]} - {livro[3]}", ln=True)
+
+    contador_livros = len(livros)
+    pdf.ln(10)  # Espaço antes do contador
+    pdf.set_font("Arial", style='B', size=12)
+    pdf.cell(200, 10, f"Total de livros cadastrados: {contador_livros}", ln=True, align='C')
+
+    pdf_path = "relatorio_livros.pdf"
+    pdf.output(pdf_path)
+
+    return send_file(pdf_path, as_attachment=True, mimetype='application/pdf')
