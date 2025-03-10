@@ -33,3 +33,7 @@ VALUES ('Valentina', 'valentina@gmail.com', 'Valentina@456')
 
 INSERT INTO USUARIOS (NOME, EMAIL, SENHA)
 VALUES ('Marina', 'marina@gmail.com', 'Marina789@')
+
+DELETE FROM USUARIOS WHERE ID_USUARIO = 4
+
+DELETE FROM USUARIOS WHERE ID_USUARIO = 10
